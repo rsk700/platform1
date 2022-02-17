@@ -12,11 +12,19 @@ pub struct Dynamic {
     pub aabb: IAabb,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum CollisionStatus {
+    Standing,
+    FreeFall,
+    WallHug,
+}
+
 #[derive(Component)]
 pub struct Actor {
     pub max_speed: f32,
     pub acceleration: Vec2,
     pub velocity: Vec2,
     // position delta, future position where actor want to move
-    pub dp: Vec2
+    pub dp: Vec2,
+    pub collision: CollisionStatus,
 }

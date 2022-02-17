@@ -5,7 +5,7 @@ mod tags;
 
 use aabb::IAabb;
 use bevy::prelude::*;
-use components::{Actor, Dynamic, Static};
+use components::{Actor, CollisionStatus, Dynamic, Static};
 use image::image_1px;
 
 const COLLISIONS: &str = "collisions";
@@ -26,7 +26,7 @@ fn main() {
 }
 
 fn setup(mut cmd: Commands, mut images: ResMut<Assets<Image>>, mut windows: ResMut<Windows>) {
-    let static_img = images.add(image_1px(Color::rgb(0.334, 0.348, 0.148)));
+    let static_img = images.add(image_1px(Color::rgb(0.12, 0.224, 0.299)));
     let actor_img = images.add(image_1px(Color::rgb(0.773, 0.205, 0.034)));
     {
         let static_aabb = IAabb::new(IVec2::new(500, 15), IVec2::new(0, -300));
@@ -57,9 +57,37 @@ fn setup(mut cmd: Commands, mut images: ResMut<Assets<Image>>, mut windows: ResM
         .insert(Static { aabb: static_aabb });
     }
     {
+        let static_aabb = IAabb::new(IVec2::new(15, 200), IVec2::new(-500, -100));
+        cmd.spawn_bundle(SpriteBundle {
+            texture: static_img.clone(),
+            transform: Transform::from_scale(Vec3::new(
+                static_aabb.halfs.x as f32 * 2.0,
+                static_aabb.halfs.y as f32 * 2.0,
+                1.0,
+            ))
+            .with_translation(static_aabb.position.as_vec2().extend(0.0)),
+            ..Default::default()
+        })
+        .insert(Static { aabb: static_aabb });
+    }
+    {
+        let static_aabb = IAabb::new(IVec2::new(100, 15), IVec2::new(-300, -150));
+        cmd.spawn_bundle(SpriteBundle {
+            texture: static_img,
+            transform: Transform::from_scale(Vec3::new(
+                static_aabb.halfs.x as f32 * 2.0,
+                static_aabb.halfs.y as f32 * 2.0,
+                1.0,
+            ))
+            .with_translation(static_aabb.position.as_vec2().extend(0.0)),
+            ..Default::default()
+        })
+        .insert(Static { aabb: static_aabb });
+    }
+    {
         let actor_aabb = IAabb::new(IVec2::new(15, 30), IVec2::new(0, -100));
         cmd.spawn_bundle(SpriteBundle {
-            texture: actor_img.clone(),
+            texture: actor_img,
             transform: Transform::from_scale(Vec3::new(
                 actor_aabb.halfs.x as f32 * 2.0,
                 actor_aabb.halfs.y as f32 * 2.0,
@@ -73,6 +101,7 @@ fn setup(mut cmd: Commands, mut images: ResMut<Assets<Image>>, mut windows: ResM
             acceleration: Vec2::ZERO,
             velocity: Vec2::ZERO,
             dp: Vec2::ZERO,
+            collision: CollisionStatus::FreeFall,
         });
     }
     windows
@@ -92,14 +121,17 @@ fn sync_dynamic_position(mut dynamic_q: Query<(&mut Transform, &Dynamic)>) {
 fn apply_gravity(mut actors_q: Query<&mut Actor>) {
     let gravity = Vec2::new(0.0, -3000.0);
     for mut a in actors_q.iter_mut() {
-        a.acceleration += gravity;
+        if a.collision != CollisionStatus::Standing {
+            a.acceleration += gravity;
+        }
     }
 }
 
 fn player_control(input: Res<Input<KeyCode>>, mut actors_q: Query<&mut Actor>, time: Res<Time>) {
     let speed = 500.0;
-    let jump_speed = 800.0;
+    let jump_speed = 900.0;
     for mut a in actors_q.iter_mut() {
+        // todo: try implement moving with acceleration and max speed
         let mut velocity = Vec2::ZERO;
         if input.pressed(KeyCode::A) {
             velocity.x += -1.0;
@@ -107,7 +139,7 @@ fn player_control(input: Res<Input<KeyCode>>, mut actors_q: Query<&mut Actor>, t
         if input.pressed(KeyCode::D) {
             velocity.x += 1.0;
         }
-        if input.pressed(KeyCode::Space) {
+        if input.just_pressed(KeyCode::Space) && a.collision == CollisionStatus::Standing {
             a.velocity = Vec2::Y * jump_speed;
         }
         a.dp += velocity * speed * time.delta_seconds();
@@ -121,6 +153,7 @@ fn update_position_delta(mut actors_q: Query<&mut Actor>, time: Res<Time>) {
         a.velocity = a.velocity.clamp_length_max(a.max_speed);
         let v = a.velocity;
         a.dp += v * time.delta_seconds();
+        // reset acceleration for next tick
         a.acceleration = Vec2::ZERO;
     }
 }
@@ -135,7 +168,8 @@ fn is_intersect(aabb: &IAabb, static_q: &Query<&Static>) -> bool {
     false
 }
 
-// todo: flags for standing on the ground, in the air, hugging wall
+// todo: debug view for all collision statuses
+// todo: try what if assign big diagonal dp?
 fn resolve_collisions(mut actors_q: Query<(&mut Actor, &mut Dynamic)>, static_q: Query<&Static>) {
     for (mut a, mut d) in actors_q.iter_mut() {
         let x_abs = a.dp.x.abs();
@@ -158,30 +192,62 @@ fn resolve_collisions(mut actors_q: Query<(&mut Actor, &mut Dynamic)>, static_q:
                 y_abs as u32,
             )
         };
-        if steps < 1 {
-            continue;
-        }
         let mut next_aabb = d.aabb.clone();
-        let mut collision = false;
+        let mut safe_pos = next_aabb.position;
+        let mut collision_along_x = false;
+        let mut collision_along_y = false;
         // start from first, because for i=0 is current actor position
         for i in 1..=steps {
-            // 1) try dx
-            // 2) try dy
-            // 3) try both
-            next_aabb.position.x = d.aabb.position.x + (dx * (i as f32)) as i32;
-            next_aabb.position.y = d.aabb.position.y + (dy * (i as f32)) as i32;
+            next_aabb.position = IVec2::new(
+                d.aabb.position.x + (dx * (i as f32)) as i32,
+                d.aabb.position.y + (dy * (i as f32)) as i32,
+            );
             if is_intersect(&next_aabb, &static_q) {
-                collision = true;
-                a.velocity = Vec2::ZERO;
-                d.aabb.position.x += (dx * ((i - 1) as f32)) as i32;
-                d.aabb.position.y += (dy * ((i - 1) as f32)) as i32;
-                a.dp = Vec2::ZERO;
+                // move along x
+                next_aabb.position = safe_pos;
+                for ix in i..=steps {
+                    next_aabb.position.x = d.aabb.position.x + (dx * (ix as f32)) as i32;
+                    if is_intersect(&next_aabb, &static_q) {
+                        collision_along_x = true;
+                        break;
+                    }
+                    safe_pos = next_aabb.position;
+                }
+                // move along y
+                next_aabb.position = safe_pos;
+                for iy in i..=steps {
+                    next_aabb.position.y = d.aabb.position.y + (dy * (iy as f32)) as i32;
+                    if is_intersect(&next_aabb, &static_q) {
+                        collision_along_y = true;
+                        break;
+                    }
+                    safe_pos = next_aabb.position;
+                }
                 break;
             }
+            safe_pos = next_aabb.position;
         }
-        if !collision {
-            d.aabb.position = next_aabb.position;
-            a.dp -= Vec2::new(dx * (steps as f32), dy * (steps as f32));
+        // check if standing on the ground
+        let is_standing = {
+            next_aabb.position = safe_pos;
+            next_aabb.position.y -= 1;
+            is_intersect(&next_aabb, &static_q)
+        };
+        let dp = (safe_pos - d.aabb.position).as_vec2();
+        a.dp -= dp;
+        d.aabb.position = safe_pos;
+        if collision_along_x {
+            a.velocity.x = 0.0;
+            a.dp.x = 0.0;
         }
+        if collision_along_y {
+            a.velocity.y = 0.0;
+            a.dp.y = 0.0;
+        }
+        a.collision = match (collision_along_x, is_standing) {
+            (true, false) => CollisionStatus::WallHug,
+            (_, true) => CollisionStatus::Standing,
+            (false, false) => CollisionStatus::FreeFall,
+        };
     }
 }
