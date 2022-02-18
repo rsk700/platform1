@@ -1,2 +1,2 @@
 # platform1
-example of 2d platformer physics
+2d platformer physics implemented for learning.
